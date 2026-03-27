@@ -1,95 +1,237 @@
-const FIREBASE_URL = "https://word-outcomes-default-rtdb.firebaseio.com//outcomes.json";
+const FIREBASE_URL = "%%FIREBASE_URL%%";
 
-let globalData = {
-    available: [],
-    taken: [],
-    unclear: []
-};
+const PAGE_SIZE = 500;
 
-function init() {
+// ── State ──────────────────────────────────────────────────────────────────
+let allItems = [];          // deduplicated, sorted master list
+let filteredItems = [];     // result of current filters
+let visibleCount = PAGE_SIZE;
+let activeLetter = null;    // currently selected A-Z letter (null = all)
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    buildAlphabet();
     fetchData();
     setInterval(fetchData, 30000);
 
-    document.getElementById('search-input').addEventListener('input', renderTable);
-    document.getElementById('filter-available').addEventListener('change', renderTable);
-    document.getElementById('filter-taken').addEventListener('change', renderTable);
-    document.getElementById('filter-unclear').addEventListener('change', renderTable);
-}
+    document.getElementById('search-input').addEventListener('input', () => {
+        visibleCount = PAGE_SIZE;
+        applyFilters();
+    });
 
+    document.getElementById('clear-search').addEventListener('click', () => {
+        document.getElementById('search-input').value = '';
+        visibleCount = PAGE_SIZE;
+        applyFilters();
+    });
+
+    ['filter-available', 'filter-taken', 'filter-unclear'].forEach(id => {
+        document.getElementById(id).addEventListener('change', () => {
+            visibleCount = PAGE_SIZE;
+            applyFilters();
+        });
+    });
+
+    document.getElementById('load-more-btn').addEventListener('click', () => {
+        visibleCount += PAGE_SIZE;
+        renderTable();
+    });
+});
+
+// ── Fetch ──────────────────────────────────────────────────────────────────
 async function fetchData() {
-    if (FIREBASE_URL.includes("YOUR-FIREBASE-PROJECT-ID")) {
-        document.getElementById('results-body').innerHTML = `<tr><td colspan="2" class="loading" style="color: red;">Setup required! Please update the FIREBASE_URL in script.js and sync.py.</td></tr>`;
-        return;
-    }
-
     try {
-        const response = await fetch(FIREBASE_URL);
-        if (!response.ok) throw new Error("Failed to fetch");
+        const res = await fetch(FIREBASE_URL);
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+        if (!data) return;
 
-        const data = await response.json();
-        if (data) {
-            globalData.available = data.available || [];
-            globalData.taken = data.taken || [];
-            globalData.unclear = data.unclear || [];
+        // Deduplicate each category and build master list
+        const dedup = (arr) => [...new Set((arr || []).map(s => s.trim().toLowerCase()).filter(Boolean))];
 
-            document.getElementById('count-available').textContent = globalData.available.length;
-            document.getElementById('count-taken').textContent = globalData.taken.length;
-            document.getElementById('count-unclear').textContent = globalData.unclear.length;
+        const available = dedup(data.available);
+        const taken     = dedup(data.taken);
+        const unclear   = dedup(data.unclear);
 
-            if (data.last_updated) {
-                const date = new Date(data.last_updated * 1000);
-                document.getElementById('last-updated').textContent = date.toLocaleTimeString();
-            }
+        // A name should appear in only one category (last write wins: available > unclear > taken)
+        const seenAvailable = new Set(available);
+        const seenUnclear   = new Set(unclear.filter(n => !seenAvailable.has(n)));
+        const seenTaken     = new Set(taken.filter(n => !seenAvailable.has(n) && !seenUnclear.has(n)));
 
-            renderTable();
+        allItems = [
+            ...[...seenAvailable].map(n => ({ name: n, status: 'available' })),
+            ...[...seenTaken].map(n => ({ name: n, status: 'taken' })),
+            ...[...seenUnclear].map(n => ({ name: n, status: 'unclear' })),
+        ].sort((a, b) => a.name.localeCompare(b.name));
+
+        // Update counts in sidebar
+        document.getElementById('count-available').textContent = seenAvailable.size.toLocaleString();
+        document.getElementById('count-taken').textContent = seenTaken.size.toLocaleString();
+        document.getElementById('count-unclear').textContent = seenUnclear.size.toLocaleString();
+        document.getElementById('total-count').textContent = allItems.length.toLocaleString();
+
+        if (data.last_updated) {
+            const d = new Date(data.last_updated * 1000);
+            document.getElementById('last-updated').textContent = d.toLocaleTimeString();
         }
-    } catch (error) {
-        console.error("Error fetching data:", error);
+
+        updateAlphabetState();
+        applyFilters();
+
+    } catch (e) {
+        console.error('Fetch failed:', e);
     }
 }
 
-function renderTable() {
-    const searchQuery = document.getElementById('search-input').value.toLowerCase();
-    const showAvailable = document.getElementById('filter-available').checked;
-    const showTaken = document.getElementById('filter-taken').checked;
+// ── Filters ────────────────────────────────────────────────────────────────
+function applyFilters() {
+    const query       = document.getElementById('search-input').value.trim().toLowerCase();
+    const showAvail   = document.getElementById('filter-available').checked;
+    const showTaken   = document.getElementById('filter-taken').checked;
     const showUnclear = document.getElementById('filter-unclear').checked;
 
+    filteredItems = allItems.filter(item => {
+        // Status filter
+        if (item.status === 'available' && !showAvail) return false;
+        if (item.status === 'taken'     && !showTaken) return false;
+        if (item.status === 'unclear'   && !showUnclear) return false;
+
+        // Letter filter (sidebar) — only applied when no search query
+        if (!query && activeLetter) {
+            if (!item.name.startsWith(activeLetter)) return false;
+        }
+
+        // Search — PREFIX match (e.g. "ba" only shows names starting with "ba")
+        if (query) {
+            if (!item.name.startsWith(query)) return false;
+        }
+
+        return true;
+    });
+
+    // Banner
+    updateBanner(query);
+    visibleCount = PAGE_SIZE;
+    renderTable();
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderTable() {
     const tbody = document.getElementById('results-body');
-    tbody.innerHTML = '';
+    const loadWrap = document.getElementById('load-more-wrap');
+    const showingInfo = document.getElementById('showing-info');
 
-    let allItems = [];
-
-    if (showAvailable) allItems = allItems.concat(globalData.available.map(name => ({ name, status: 'available' })));
-    if (showTaken) allItems = allItems.concat(globalData.taken.map(name => ({ name, status: 'taken' })));
-    if (showUnclear) allItems = allItems.concat(globalData.unclear.map(name => ({ name, status: 'unclear' })));
-
-    if (searchQuery) {
-        allItems = allItems.filter(item => item.name.toLowerCase().includes(searchQuery));
-    }
-
-    allItems.sort((a, b) => a.name.localeCompare(b.name));
-
-    if (allItems.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="2" class="loading">No results found</td></tr>`;
+    if (filteredItems.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="2" class="msg">No results found.</td></tr>`;
+        loadWrap.classList.add('hidden');
         return;
     }
 
-    const renderLimit = 500;
-    const itemsToRender = allItems.slice(0, renderLimit);
+    const slice = filteredItems.slice(0, visibleCount);
 
-    const rowsHTML = itemsToRender.map(item => `
+    tbody.innerHTML = slice.map(item => `
         <tr>
-            <td>${item.name}</td>
-            <td><span class="status-badge status-${item.status}">${item.status}</span></td>
+            <td>${escHtml(item.name)}</td>
+            <td><span class="badge ${item.status}">${item.status}</span></td>
         </tr>
     `).join('');
 
-    let extraHTML = '';
-    if (allItems.length > renderLimit) {
-        extraHTML = `<tr><td colspan="2" class="loading">Showing first ${renderLimit} of ${allItems.length} results. Use search to find specific users.</td></tr>`;
+    if (filteredItems.length > visibleCount) {
+        loadWrap.classList.remove('hidden');
+        showingInfo.textContent = `Showing ${visibleCount.toLocaleString()} of ${filteredItems.length.toLocaleString()}`;
+    } else {
+        loadWrap.classList.add('hidden');
+        showingInfo.textContent = '';
     }
-
-    tbody.innerHTML = rowsHTML + extraHTML;
 }
 
-document.addEventListener('DOMContentLoaded', init);
+// ── Alphabet sidebar ───────────────────────────────────────────────────────
+function buildAlphabet() {
+    const grid = document.getElementById('alphabet-grid');
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').forEach(letter => {
+        const btn = document.createElement('button');
+        btn.className = 'letter-btn';
+        btn.id = `letter-${letter}`;
+        btn.textContent = letter;
+        btn.addEventListener('click', () => selectLetter(letter));
+        grid.appendChild(btn);
+    });
+}
+
+function selectLetter(letter) {
+    const lower = letter.toLowerCase();
+
+    // Check if the letter has been reached at all yet
+    const hasAny = allItems.some(item => item.name.startsWith(lower));
+
+    if (!hasAny) {
+        showToast(`Script hasn't reached '${letter}' yet — check back later.`);
+        return;
+    }
+
+    // Toggle off if already active
+    if (activeLetter === lower) {
+        activeLetter = null;
+        document.getElementById(`letter-${letter}`).classList.remove('active');
+    } else {
+        activeLetter = lower;
+        document.querySelectorAll('.letter-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById(`letter-${letter}`).classList.add('active');
+        // Clear the search when using the letter selector
+        document.getElementById('search-input').value = '';
+    }
+
+    visibleCount = PAGE_SIZE;
+    applyFilters();
+}
+
+function updateAlphabetState() {
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').forEach(letter => {
+        const btn = document.getElementById(`letter-${letter}`);
+        if (!btn) return;
+        const hasAny = allItems.some(item => item.name.startsWith(letter.toLowerCase()));
+        btn.classList.toggle('unreached', !hasAny);
+    });
+}
+
+// ── Banner ─────────────────────────────────────────────────────────────────
+function updateBanner(query) {
+    const banner = document.getElementById('active-filter-banner');
+    let msg = null;
+
+    if (query) {
+        msg = `Showing names starting with "<strong>${escHtml(query)}</strong>"`;
+    } else if (activeLetter) {
+        msg = `Showing names starting with "<strong>${activeLetter.toUpperCase()}</strong>"`;
+    }
+
+    if (msg) {
+        banner.classList.remove('hidden');
+        banner.innerHTML = `<span>${msg}</span><button onclick="clearAllFilters()">Clear</button>`;
+    } else {
+        banner.classList.add('hidden');
+    }
+}
+
+function clearAllFilters() {
+    document.getElementById('search-input').value = '';
+    activeLetter = null;
+    document.querySelectorAll('.letter-btn').forEach(b => b.classList.remove('active'));
+    visibleCount = PAGE_SIZE;
+    applyFilters();
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────
+let toastTimer = null;
+function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.add('hidden'), 3500);
+}
+
+// ── Utils ──────────────────────────────────────────────────────────────────
+function escHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
