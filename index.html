@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Word Outcomes Database</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Word Outcomes Database</h1>
+            <p class="subtitle">Live updating repository of verified usernames. Last updated: <span id="last-updated">Never</span></p>
+        </header>
+
+        <div class="controls">
+            <input type="text" id="search-input" placeholder="Search usernames...">
+            
+            <div class="filter-group">
+                <label><input type="checkbox" id="filter-available" checked> Available (<span id="count-available">0</span>)</label>
+                <label><input type="checkbox" id="filter-taken" checked> Taken (<span id="count-taken">0</span>)</label>
+                <label><input type="checkbox" id="filter-unclear" checked> Unclear (<span id="count-unclear">0</span>)</label>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table id="results-table">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="results-body">
+                    <tr><td colspan="2" class="loading">Loading data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
